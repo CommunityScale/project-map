@@ -1,4 +1,4 @@
-<img src="https://raw.githubusercontent.com/CommunityScale/media-kit/main/png/communityscale-wordmark-black.png" alt="CommunityScale Wordmark Black" height="50">
+<img src="https://raw.githubusercontent.com/CommunityScale/media-kit/main/png/communityscale-wordmark-black.png" alt="CommunityScale Wordmark Black" height="30">
 
 # CommunityScale Project Map
 
