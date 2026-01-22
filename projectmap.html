@@ -94,15 +94,15 @@ map.on('load', async () => {
   map.setFog({});
 
   try {
-    // 4) make sure this filename matches your actual CSV
-    const resp = await fetch('proj.csv');
+    // 4) fetch from live Google Sheets CSV
+    const resp = await fetch('https://docs.google.com/spreadsheets/d/e/2PACX-1vSn5ksUiVITRYgWt-E3maCu2jwE94QZSxG_80oWM4pCRVx51K-Y6B649BpnAQ5axaFu91Pw5j35wWi7/pub?gid=2091918674&single=true&output=csv');
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const csvText = await resp.text();
     const geojson = csvToGeoJSON(csvText);
     console.log('Loaded features:', geojson.features.length);
 
-    // 5) add source + layer
-    map.addSource('projects', { type: 'geojson', data: 'projplaces3.geojson' });
+    // 5) add source + layer using the live data
+    map.addSource('projects', { type: 'geojson', data: geojson });
     map.addLayer({
       id: 'points',
       type: 'circle',
