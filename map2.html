@@ -1,0 +1,680 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>CommunityScale projects</title>
+  <meta name="viewport" content="initial-scale=1,maximum-scale=1,user-scalable=no">
+  <link href="https://api.mapbox.com/mapbox-gl-js/v2.11.0/mapbox-gl.css" rel="stylesheet">
+  <script src="https://api.mapbox.com/mapbox-gl-js/v2.11.0/mapbox-gl.js"></script>
+  <script src="https://unpkg.com/papaparse@5.4.1/papaparse.min.js"></script>
+  <script src="config.js"></script>
+  <link href="https://fonts.googleapis.com/css2?family=Roboto&family=Roboto+Condensed:wght@700&display=swap" rel="stylesheet">
+  <style>
+    html, body, #map { height: 100%; margin: 0; }
+    .legend { position:absolute; right:10px; bottom:30px; background:#fff; padding:10px; font:12px/20px Roboto,sans-serif; border-radius:6px; box-shadow:0 1px 2px rgba(0,0,0,.1) }
+    .legend div span { display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:6px; }
+    .mapboxgl-popup-close-button { display: none; }
+    .reset-btn { position:absolute; top:10px; right:10px; background:#fff; padding:8px 12px; font:12px Roboto,sans-serif; border:none; border-radius:4px; box-shadow:0 1px 2px rgba(0,0,0,.1); cursor:pointer; }
+    .reset-btn:hover { background:#f5f5f5; }
+    .zoom-controls { position:absolute; top:50px; right:10px; display:flex; flex-direction:column; gap:4px; }
+    .zoom-btn { background:#fff; width:32px; height:32px; font:18px Roboto,sans-serif; border:none; border-radius:4px; box-shadow:0 1px 2px rgba(0,0,0,.1); cursor:pointer; display:flex; align-items:center; justify-content:center; }
+    .zoom-btn:hover { background:#f5f5f5; }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <button class="reset-btn" onclick="resetView()">Reset map</button>
+  <div class="zoom-controls">
+    <button class="zoom-btn" onclick="map.zoomIn()">+</button>
+    <button class="zoom-btn" onclick="map.zoomOut()">−</button>
+  </div>
+  <div class="legend" id="points-legend" style="display:none">
+    <div><span style="background-color:#8795eb"></span>Regional Projects</div>
+    <div><span style="background-color:#1b2f5a"></span>Completed project</div>
+    <div><span style="background-color:#82AC21"></span>Ongoing work</div>
+  </div>
+  <div class="legend" id="region-legend" style="display:none">
+    <div><span style="background-color:#8795eb"></span>Regional Projects</div>
+    <div><span style="background-color:#1b2f5a"></span>Local Projects</div>
+  </div>
+
+<script>
+// 1) ACCESS TOKEN + MAP INIT (this was missing)
+mapboxgl.accessToken = MAPBOX_TOKEN;
+const initialCenter = [-86, 39];
+const initialZoom = 3.4;
+const map = new mapboxgl.Map({
+  container: 'map',
+  style: 'mapbox://styles/mapbox/light-v11',
+  center: initialCenter, zoom: initialZoom, projection: 'mercator'
+});
+
+// Reset view function
+window.resetView = function() {
+  // Close any open popups
+  const popups = document.getElementsByClassName('mapboxgl-popup');
+  if (popups.length) {
+    for (let i = 0; i < popups.length; i++) {
+      popups[i].remove();
+    }
+  }
+
+  map.flyTo({
+    center: initialCenter,
+    zoom: initialZoom,
+    essential: true
+  });
+};
+
+// Store projects globally for click handlers
+let projectsGeojson = null;
+
+// 2) classification helper
+function classifyService(serviceRaw) {
+  const s = (serviceRaw || '').toLowerCase();
+  if (s.includes('zoning')) return 'Zoning';
+  if (s.includes('housing')) return 'Housing Plan';
+  return 'Other project type/service';
+}
+
+// 3) CSV -> GeoJSON (skip blanks/#REF!, add category)
+function csvToGeoJSON(csv) {
+  const parsed = Papa.parse(csv, { header: true, skipEmptyLines: true });
+  const features = [];
+  for (const row of parsed.data) {
+    const latRaw = (row.lat || '').toString().trim();
+    const lonRaw = (row.long || '').toString().trim();
+    if (!latRaw || !lonRaw) continue;
+    if (latRaw.toUpperCase().includes('REF') || lonRaw.toUpperCase().includes('REF')) continue;
+    const lat = Number(latRaw), lon = Number(lonRaw);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+
+    features.push({
+      type: 'Feature',
+      geometry: { type: 'Point', coordinates: [lon, lat] },
+      properties: { ...row, category: classifyService(row.service) }
+    });
+  }
+  return { type: 'FeatureCollection', features };
+}
+
+// Update legend visibility based on zoom level
+function updateLegendVisibility() {
+  const zoom = map.getZoom();
+  const pointsLegend = document.getElementById('points-legend');
+  const regionLegend = document.getElementById('region-legend');
+
+  // Points legend visible when points layer is visible (zoom >= 6.5)
+  pointsLegend.style.display = zoom >= 6.5 ? 'block' : 'none';
+
+  // Region legend visible when county/region layers are visible (zoom 4.5-6.5)
+  regionLegend.style.display = (zoom >= 4.5 && zoom < 6.5) ? 'block' : 'none';
+}
+
+// Update legends on zoom change
+map.on('zoom', updateLegendVisibility);
+
+// Initial legend update
+updateLegendVisibility();
+
+map.on('load', async () => {
+  map.setFog({});
+
+  try {
+    // 4) fetch from live Google Sheets CSV
+    const resp = await fetch('https://docs.google.com/spreadsheets/d/e/2PACX-1vSn5ksUiVITRYgWt-E3maCu2jwE94QZSxG_80oWM4pCRVx51K-Y6B649BpnAQ5axaFu91Pw5j35wWi7/pub?gid=2091918674&single=true&output=csv');
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const csvText = await resp.text();
+    const geojson = csvToGeoJSON(csvText);
+    projectsGeojson = geojson; // Store globally for click handlers
+    console.log('Loaded features:', geojson.features.length);
+
+    // Extract unique states from projects (including states referenced in RegionCounties)
+    const projectStates = new Set();
+    geojson.features.forEach(f => {
+      const state = (f.properties.State || '').trim().toUpperCase();
+      if (state && state.length === 2) {
+        projectStates.add(state);
+      }
+
+      // Also extract states from RegionCounties (multi-state format: "CountyName ST")
+      const regionCounties = f.properties.RegionCounties || '';
+      regionCounties.split(',').forEach(county => {
+        const trimmed = county.trim();
+        if (!trimmed) return;
+        const parts = trimmed.split(' ');
+        const lastPart = parts[parts.length - 1];
+        if (lastPart && lastPart.length === 2 && lastPart === lastPart.toUpperCase()) {
+          projectStates.add(lastPart);
+        }
+      });
+    });
+    console.log('Project states:', Array.from(projectStates));
+
+    // Fetch state boundaries from ArcGIS
+    const stateAbbrs = Array.from(projectStates);
+    const whereClause = stateAbbrs.map(s => `'${s}'`).join(',');
+    const stateUrl = `https://services.arcgis.com/P3ePLMYs2RVChkJx/arcgis/rest/services/USA_State_Boundaries/FeatureServer/0/query?where=STATE_ABBR IN (${whereClause})&outFields=STATE_ABBR,STATE_NAME&f=geojson`;
+
+    const stateResp = await fetch(stateUrl);
+    const stateGeojson = await stateResp.json();
+    console.log('Loaded state boundaries:', stateGeojson.features?.length || 0);
+
+    // Add state boundaries source
+    map.addSource('state-boundaries', {
+      type: 'geojson',
+      data: stateGeojson
+    });
+
+    // Add state fill layer (zoom 1-4)
+    map.addLayer({
+      id: 'state-fills',
+      type: 'fill',
+      source: 'state-boundaries',
+      maxzoom: 5,
+      paint: {
+        'fill-color': '#1b2f5a',
+        'fill-opacity': 0.3
+      }
+    });
+
+    // Add state outline layer (zoom 1-4)
+    map.addLayer({
+      id: 'state-outlines',
+      type: 'line',
+      source: 'state-boundaries',
+      maxzoom: 5,
+      paint: {
+        'line-color': '#1b2f5a',
+        'line-width': 2
+      }
+    });
+
+    // 5) Fetch county boundaries from ArcGIS for project states
+    const countyUrl = `https://services.arcgis.com/P3ePLMYs2RVChkJx/ArcGIS/rest/services/USA_Counties_Generalized_Boundaries/FeatureServer/0/query?where=STATE_ABBR IN (${whereClause})&outFields=NAME,STATE_ABBR&f=geojson`;
+
+    const countyResp = await fetch(countyUrl);
+    const countyGeojson = await countyResp.json();
+    console.log('Loaded county boundaries:', countyGeojson.features?.length || 0);
+    if (countyGeojson.features?.length > 0) {
+      console.log('Sample county:', countyGeojson.features[0].properties);
+    }
+
+    // Add county boundaries source
+    map.addSource('counties', {
+      type: 'geojson',
+      data: countyGeojson
+    });
+
+    // 5b) add county layers (visible at zoom 5-9)
+    // Add invisible county query layer (always shows all counties for spatial queries)
+    map.addLayer({
+      id: 'county-query',
+      type: 'fill',
+      source: 'counties',
+      paint: {
+        'fill-opacity': 0 // Invisible but queryable
+      }
+    });
+
+    // Add county highlight layer for Region projects (visible at zoom 4.5+, stays visible with dots)
+    map.addLayer({
+      id: 'county-highlights-regions',
+      type: 'fill',
+      source: 'counties',
+      minzoom: 4.5,
+      paint: {
+        'fill-color': '#8795eb',
+        'fill-opacity': 0.4
+      },
+      filter: ['==', 'NAME', ''] // Initially empty, will update after load
+    });
+
+    // Add county outline layer for non-Region projects (visible at zoom 5-9)
+    map.addLayer({
+      id: 'county-outlines',
+      type: 'line',
+      source: 'counties',
+      minzoom: 4.5,
+      maxzoom: 6.5,
+      paint: {
+        'line-color': '#1b2f5a',
+        'line-width': 2
+      },
+      filter: ['==', 'NAME', ''] // Initially empty, will update after load
+    });
+
+    // Add county fill layer for non-Region projects (visible at zoom 5-9, lighter fill)
+    map.addLayer({
+      id: 'county-fills',
+      type: 'fill',
+      source: 'counties',
+      minzoom: 4.5,
+      maxzoom: 6.5,
+      paint: {
+        'fill-color': '#1b2f5a',
+        'fill-opacity': 0.2
+      },
+      filter: ['==', 'NAME', ''] // Initially empty, will update after load
+    });
+
+    // Add Muni county layers (outline for counties containing Muni dots)
+    map.addLayer({
+      id: 'muni-county-fills',
+      type: 'fill',
+      source: 'counties',
+      minzoom: 4.5,
+      maxzoom: 6.5,
+      paint: {
+        'fill-color': '#1b2f5a',
+        'fill-opacity': 0.15
+      },
+      filter: ['==', 'NAME', ''] // Initially empty, will update via spatial query
+    });
+
+    map.addLayer({
+      id: 'muni-county-outlines',
+      type: 'line',
+      source: 'counties',
+      minzoom: 4.5,
+      maxzoom: 6.5,
+      paint: {
+        'line-color': '#1b2f5a',
+        'line-width': 2
+      },
+      filter: ['==', 'NAME', ''] // Initially empty, will update via spatial query
+    });
+
+    // 5c) add projects source + layer (above counties)
+    map.addSource('projects', { type: 'geojson', data: geojson });
+
+    // Points layer (visible at zoom 8+)
+    map.addLayer({
+      id: 'points',
+      type: 'circle',
+      source: 'projects',
+      minzoom: 6.5,
+      paint: {
+        'circle-radius': [
+          'interpolate',
+          ['linear'],
+          ['zoom'],
+          7, 5,
+          14, 7,
+          18, 12
+        ],
+        'circle-stroke-width': 1,
+        'circle-stroke-color': 'white',
+        'circle-opacity': 0.9,
+        // Color based on Status attribute
+        'circle-color': [
+          'case',
+          // If Status contains 'completed', use navy
+          ['in', 'complete', ['downcase', ['coalesce', ['get', 'Status'], '']]],
+          '#1b2f5a',
+          // Otherwise (ongoing), use green
+          '#82AC21'
+        ]
+      }
+    });
+
+    // 6) add labels layer (visible at zoom 9+)
+    map.addLayer({
+      id: 'labels',
+      type: 'symbol',
+      source: 'projects',
+      minzoom: 9,
+      layout: {
+        'text-field': ['get', 'NameLocation'],
+        'text-font': ['Roboto Condensed', 'Arial Unicode MS Regular'],
+        'text-size': 12,
+        'text-offset': [0, 1],
+        'text-anchor': 'top'
+      },
+      paint: {
+        'text-color': '#000000',
+        'text-halo-color': '#ffffff',
+        'text-halo-width': 2
+      }
+    });
+
+    // Store Muni project coordinates for spatial queries
+    const muniProjects = geojson.features.filter(f => f.properties.PlaceType === 'Muni');
+    const muniCountiesFound = new Map(); // Map of "NAME|STATE_ABBR" -> {name, state}
+
+    // Function to query counties for Muni projects via spatial lookup
+    const updateMuniCounties = () => {
+      muniProjects.forEach(feature => {
+        const coords = feature.geometry.coordinates;
+        const point = map.project(coords); // Convert lng/lat to screen pixels
+
+        // Query the county-query layer at this point
+        const counties = map.queryRenderedFeatures(point, { layers: ['county-query'] });
+
+        if (counties.length > 0) {
+          const countyName = counties[0].properties.NAME;
+          const countyState = counties[0].properties.STATE_ABBR;
+          const key = `${countyName}|${countyState}`;
+          if (countyName && !muniCountiesFound.has(key)) {
+            muniCountiesFound.set(key, { name: countyName, state: countyState });
+          }
+        }
+      });
+
+      // Update the Muni county layers filter using NAME and STATE_ABBR
+      if (muniCountiesFound.size > 0) {
+        const filterConditions = Array.from(muniCountiesFound.values()).map(c =>
+          ['all', ['==', 'NAME', c.name], ['==', 'STATE_ABBR', c.state]]
+        );
+        map.setFilter('muni-county-outlines', ['any', ...filterConditions]);
+        map.setFilter('muni-county-fills', ['any', ...filterConditions]);
+        console.log('Muni counties found:', Array.from(muniCountiesFound.values()));
+      }
+    };
+
+    // Helper to ensure "County" suffix is present (ArcGIS NAME field includes it)
+    const ensureCountySuffix = (name) => {
+      const trimmed = name.trim();
+      if (trimmed.toLowerCase().endsWith(' county')) {
+        return trimmed;
+      }
+      return trimmed + ' County';
+    };
+
+    // Wait for county data to load, then determine which counties to highlight
+    const updateCountyHighlights = () => {
+      const regionCounties = []; // Array of {name, state} objects
+
+      geojson.features.forEach(feature => {
+        const placeType = (feature.properties.PlaceType || '').trim();
+        const state = (feature.properties.State || '').toUpperCase();
+
+        if (placeType.toLowerCase() === 'region') {
+          // Parse RegionCounties for Region projects (filled shading)
+          const regionCountiesStr = feature.properties.RegionCounties || '';
+          regionCountiesStr.split(',').forEach(county => {
+            const trimmed = county.trim();
+            if (!trimmed) return;
+
+            const parts = trimmed.split(' ');
+            const lastPart = parts[parts.length - 1];
+
+            if (lastPart && lastPart.length === 2 && lastPart === lastPart.toUpperCase()) {
+              // Multi-state format: "CountyName ST" or "CountyName County ST"
+              const cName = ensureCountySuffix(parts.slice(0, -1).join(' '));
+              regionCounties.push({ name: cName, state: lastPart });
+            } else {
+              // Standard format: just county name, use project's state
+              regionCounties.push({ name: ensureCountySuffix(trimmed), state: state });
+            }
+          });
+        }
+      });
+
+      console.log('Region counties (filled):', regionCounties);
+
+      // Debug: log available counties in the source
+      const countySource = map.getSource('counties');
+      if (countySource && countySource._data) {
+        console.log('Available counties sample:', countySource._data.features?.slice(0, 5).map(f => ({
+          NAME: f.properties.NAME,
+          STATE_ABBR: f.properties.STATE_ABBR
+        })));
+      }
+
+      // Build filter for region counties using NAME and STATE_ABBR fields
+      if (regionCounties.length > 0) {
+        const filterConditions = regionCounties.map(c =>
+          ['all', ['==', 'NAME', c.name], ['==', 'STATE_ABBR', c.state]]
+        );
+        const filter = ['any', ...filterConditions];
+        console.log('Setting region filter:', JSON.stringify(filter).slice(0, 500));
+        map.setFilter('county-highlights-regions', filter);
+      }
+
+      // Also update Muni counties via spatial query
+      updateMuniCounties();
+    };
+
+    // Listen for when the map is idle (all tiles loaded) to update counties
+    map.once('idle', updateCountyHighlights);
+
+    // Update Muni counties as map moves (to catch counties that come into view)
+    map.on('moveend', updateMuniCounties);
+
+    // 7) popups with multi-feature handling
+map.on('click', 'points', (e) => {
+  const allFeatures = map.queryRenderedFeatures(e.point, { layers: ['points'] });
+
+  // Deduplicate features based on Project name (in case same feature is rendered multiple times)
+  const seen = new Set();
+  const deduped = allFeatures.filter(f => {
+    const key = f.properties.Project;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+
+  // Get the CentroidPlace of the first clicked feature
+  const clickedPlace = deduped[0]?.properties.CentroidPlace;
+
+  // Filter to only include features from the same CentroidPlace
+  const features = deduped.filter(f => f.properties.CentroidPlace === clickedPlace);
+
+  // Sort features alphabetically by Project name
+  features.sort((a, b) => {
+    const nameA = (a.properties.Project || '').toLowerCase();
+    const nameB = (b.properties.Project || '').toLowerCase();
+    return nameA.localeCompare(nameB);
+  });
+
+  // If multiple features at same location, show list
+  if (features.length > 1) {
+    let html = '<div style="font-family:Roboto,sans-serif;font-size:12px;line-height:1.4">';
+
+    features.forEach((feature, i) => {
+      const p = feature.properties;
+
+      let description = '';
+      if (p['Resume blurb']) {
+        const parts = p['Resume blurb'].split(': ');
+        description = parts.length > 1 ? parts.slice(1).join(': ').trim() : '';
+      }
+
+      const blogLink = p['CS blog link'] && p['CS blog link'].toLowerCase() !== 'not_applicable' ? p['CS blog link'] : '';
+
+      html += `<div style="padding:8px 0;border-top:1px solid #eee">
+        <div style="font-family:'Roboto Condensed',sans-serif;font-weight:700;font-size:14px;margin-bottom:4px">${p.Project || 'Untitled'}</div>
+        ${p.Service ? `<div style="margin-top:4px"><strong>Service:</strong> ${p.Service}</div>` : ''}
+        ${description ? `<div style="margin-top:4px"><strong>Description:</strong> ${description}</div>` : ''}
+        ${blogLink ? `<div style="margin-top:6px"><a href="${blogLink}" target="_blank" style="color:#1b2f5a;text-decoration:none">Learn more →</a></div>` : ''}
+      </div>`;
+    });
+    html += '</div>';
+
+    new mapboxgl.Popup().setLngLat(e.lngLat).setHTML(html).addTo(map);
+  } else {
+    // Single feature - show full popup
+    const p = features[0].properties;
+
+    let description = '';
+    if (p['Resume blurb']) {
+      const parts = p['Resume blurb'].split(': ');
+      description = parts.length > 1 ? parts.slice(1).join(': ').trim() : '';
+    }
+
+    const blogLink = p['CS blog link'] && p['CS blog link'].toLowerCase() !== 'not_applicable' ? p['CS blog link'] : '';
+
+    const html = `
+      <div style="font-family:Roboto,sans-serif;font-size:12px;line-height:1.4">
+        <div style="font-family:'Roboto Condensed',sans-serif;font-weight:700;font-size:14px;margin-bottom:4px">${p.Project || 'Untitled'}</div>
+        ${p.Service ? `<div style="margin-top:4px"><strong>Service:</strong> ${p.Service}</div>` : ''}
+        ${description ? `<div style="margin-top:4px"><strong>Description:</strong> ${description}</div>` : ''}
+        ${blogLink ? `<div style="margin-top:6px"><a href="${blogLink}" target="_blank" style="color:#1b2f5a;text-decoration:none">Learn more →</a></div>` : ''}
+      </div>`;
+
+    new mapboxgl.Popup().setLngLat(e.lngLat).setHTML(html).addTo(map);
+  }
+});
+
+// Helper function for showing single popup from list
+window.showSinglePopup = function(index, features, lngLat) {
+  const p = features[index];
+
+  let description = '';
+  if (p['Resume blurb']) {
+    const parts = p['Resume blurb'].split(': ');
+    description = parts.length > 1 ? parts.slice(1).join(': ').trim() : '';
+  }
+
+  const blogLink = p['CS blog link'] && p['CS blog link'].toLowerCase() !== 'not_applicable' ? p['CS blog link'] : '';
+
+  const html = `
+    <div style="font-family:Roboto,sans-serif;font-size:12px;line-height:1.4">
+      <div style="font-family:'Roboto Condensed',sans-serif;font-weight:700;font-size:14px;margin-bottom:4px">${p.Project || 'Untitled'}</div>
+      ${p.Service ? `<div style="margin-top:4px"><strong>Service:</strong> ${p.Service}</div>` : ''}
+      ${description ? `<div style="margin-top:4px"><strong>Description:</strong> ${description}</div>` : ''}
+      ${blogLink ? `<div style="margin-top:6px"><a href="${blogLink}" target="_blank" style="color:#1b2f5a;text-decoration:none">Learn more →</a></div>` : ''}
+      <div style="margin-top:8px;padding-top:6px;border-top:1px solid #eee;font-size:11px;color:#666;cursor:pointer" onclick="history.back()">← Back to list</div>
+    </div>`;
+
+  new mapboxgl.Popup().setLngLat(lngLat).setHTML(html).addTo(map);
+};
+    map.on('mouseenter', 'points', () => map.getCanvas().style.cursor = 'pointer');
+    map.on('mouseleave', 'points', () => map.getCanvas().style.cursor = '');
+
+    // Click handler for state fills (zoom 0-10)
+    map.on('click', 'state-fills', (e) => {
+      const stateFeature = e.features[0];
+      const stateAbbr = stateFeature.properties.STATE_ABBR;
+      const stateName = stateFeature.properties.STATE_NAME;
+
+      // Find all projects in this state
+      const stateProjects = projectsGeojson.features.filter(f =>
+        (f.properties.State || '').toUpperCase() === stateAbbr
+      );
+
+      if (stateProjects.length === 0) return;
+
+      // Sort alphabetically by project name
+      stateProjects.sort((a, b) =>
+        (a.properties.Project || '').localeCompare(b.properties.Project || '')
+      );
+
+      let html = `<div style="font-family:Roboto,sans-serif;font-size:12px;line-height:1.4;max-height:300px;overflow-y:auto">
+        <div style="font-family:'Roboto Condensed',sans-serif;font-weight:700;font-size:16px;margin-bottom:8px;border-bottom:2px solid #1b2f5a;padding-bottom:4px">${stateName}</div>
+        <div style="font-size:11px;color:#666;margin-bottom:8px">${stateProjects.length} project${stateProjects.length > 1 ? 's' : ''}</div>`;
+
+      stateProjects.forEach(feature => {
+        const p = feature.properties;
+        html += `<div style="padding:6px 0;border-top:1px solid #eee">
+          <div style="font-weight:700">${p.Project || 'Untitled'}</div>
+          ${p.NameLocation ? `<div style="color:#666;font-size:11px">${p.NameLocation}</div>` : ''}
+        </div>`;
+      });
+
+      html += '</div>';
+
+      new mapboxgl.Popup().setLngLat(e.lngLat).setHTML(html).addTo(map);
+    });
+
+    map.on('mouseenter', 'state-fills', () => map.getCanvas().style.cursor = 'pointer');
+    map.on('mouseleave', 'state-fills', () => map.getCanvas().style.cursor = '');
+
+    // Click handler for county fills (zoom 5-9)
+    const handleCountyClick = (e) => {
+      const countyFeature = e.features[0];
+      const countyNameFull = countyFeature.properties.NAME; // e.g., "Suffolk County"
+      const countyState = countyFeature.properties.STATE_ABBR; // e.g., "MA"
+      const countyFullName = `${countyNameFull}, ${countyState}`;
+      // Strip "County" suffix for matching against project data
+      const countyName = countyNameFull.replace(/\s+County$/i, '').trim();
+
+      // Find all projects in this county (check County field and RegionCounties)
+      const countyProjects = projectsGeojson.features.filter(f => {
+        const state = (f.properties.State || '').toUpperCase();
+        const county = f.properties.County || '';
+        const regionCounties = f.properties.RegionCounties || '';
+
+        // Check direct county match
+        if (state === countyState && county === countyName) {
+          return true;
+        }
+
+        // Check if this county is in RegionCounties
+        if (regionCounties) {
+          const counties = regionCounties.split(',').map(c => c.trim());
+          for (const rc of counties) {
+            const rcParts = rc.split(' ');
+            const lastPart = rcParts[rcParts.length - 1];
+
+            if (lastPart && lastPart.length === 2 && lastPart === lastPart.toUpperCase()) {
+              // Multi-state format
+              const rcName = rcParts.slice(0, -1).join(' ');
+              const rcState = lastPart;
+              if (rcName === countyName && rcState === countyState) {
+                return true;
+              }
+            } else {
+              // Standard format
+              if (rc === countyName && state === countyState) {
+                return true;
+              }
+            }
+          }
+        }
+
+        return false;
+      });
+
+      if (countyProjects.length === 0) return;
+
+      // Sort alphabetically by project name
+      countyProjects.sort((a, b) =>
+        (a.properties.Project || '').localeCompare(b.properties.Project || '')
+      );
+
+      let html = `<div style="font-family:Roboto,sans-serif;font-size:12px;line-height:1.4;max-height:300px;overflow-y:auto">
+        <div style="font-family:'Roboto Condensed',sans-serif;font-weight:700;font-size:16px;margin-bottom:8px;border-bottom:2px solid #1b2f5a;padding-bottom:4px">${countyFullName}</div>
+        <div style="font-size:11px;color:#666;margin-bottom:8px">${countyProjects.length} project${countyProjects.length > 1 ? 's' : ''}</div>`;
+
+      countyProjects.forEach(feature => {
+        const p = feature.properties;
+        let description = '';
+        if (p['Resume blurb']) {
+          const descParts = p['Resume blurb'].split(': ');
+          description = descParts.length > 1 ? descParts.slice(1).join(': ').trim() : '';
+        }
+
+        const blogLink = p['CS blog link'] && p['CS blog link'].toLowerCase() !== 'not_applicable' ? p['CS blog link'] : '';
+
+        html += `<div style="padding:8px 0;border-top:1px solid #eee">
+          <div style="font-weight:700">${p.Project || 'Untitled'}</div>
+          ${p.Service ? `<div style="margin-top:4px"><strong>Service:</strong> ${p.Service}</div>` : ''}
+          ${description ? `<div style="margin-top:4px"><strong>Description:</strong> ${description}</div>` : ''}
+          ${blogLink ? `<div style="margin-top:6px"><a href="${blogLink}" target="_blank" style="color:#1b2f5a;text-decoration:none">Learn more →</a></div>` : ''}
+        </div>`;
+      });
+
+      html += '</div>';
+
+      new mapboxgl.Popup().setLngLat(e.lngLat).setHTML(html).addTo(map);
+    };
+
+    map.on('click', 'county-fills', handleCountyClick);
+    map.on('click', 'county-highlights-regions', handleCountyClick);
+    map.on('click', 'muni-county-fills', handleCountyClick);
+
+    map.on('mouseenter', 'county-fills', () => map.getCanvas().style.cursor = 'pointer');
+    map.on('mouseleave', 'county-fills', () => map.getCanvas().style.cursor = '');
+    map.on('mouseenter', 'county-highlights-regions', () => map.getCanvas().style.cursor = 'pointer');
+    map.on('mouseleave', 'county-highlights-regions', () => map.getCanvas().style.cursor = '');
+    map.on('mouseenter', 'muni-county-fills', () => map.getCanvas().style.cursor = 'pointer');
+    map.on('mouseleave', 'muni-county-fills', () => map.getCanvas().style.cursor = '');
+  } catch (e) {
+    console.error('CSV load error:', e);
+  }
+});
+</script>
+</body>
+</html>

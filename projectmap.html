@@ -35,12 +35,12 @@
 
 <script>
 // 1) ACCESS TOKEN + MAP INIT (this was missing)
-mapboxgl.accessToken = 'pk.eyJ1Ijoic2FyYWJyZW50IiwiYSI6ImNtMHpsb2Q4NTAwemoybHExbnB6eHVvZ2kifQ.nH0hUSv3IGzX6MkYB_cSmA';
+mapboxgl.accessToken = 'REDACTED';
 const initialCenter = [-86, 39];
 const initialZoom = 3.4;
 const map = new mapboxgl.Map({
   container: 'map',
-  style: 'mapbox://styles/mapbox/light-v11',
+  style: 'mapbox://styles/communityscale/cmhp0lcag006p01s5a2qj6968',
   center: initialCenter, zoom: initialZoom, projection: 'mercator'
 });
 
@@ -61,7 +61,20 @@ window.resetView = function() {
   });
 };
 
-// 2) classification helper
+// 2) state abbreviation to GEOID mapping
+const stateToGEOID = {
+  'AL': '01', 'AK': '02', 'AZ': '04', 'AR': '05', 'CA': '06', 'CO': '08',
+  'CT': '09', 'DE': '10', 'FL': '12', 'GA': '13', 'HI': '15', 'ID': '16',
+  'IL': '17', 'IN': '18', 'IA': '19', 'KS': '20', 'KY': '21', 'LA': '22',
+  'ME': '23', 'MD': '24', 'MA': '25', 'MI': '26', 'MN': '27', 'MS': '28',
+  'MO': '29', 'MT': '30', 'NE': '31', 'NV': '32', 'NH': '33', 'NJ': '34',
+  'NM': '35', 'NY': '36', 'NC': '37', 'ND': '38', 'OH': '39', 'OK': '40',
+  'OR': '41', 'PA': '42', 'RI': '44', 'SC': '45', 'SD': '46', 'TN': '47',
+  'TX': '48', 'UT': '49', 'VT': '50', 'VA': '51', 'WA': '53', 'WV': '54',
+  'WI': '55', 'WY': '56'
+};
+
+// 3) classification helper
 function classifyService(serviceRaw) {
   const s = (serviceRaw || '').toLowerCase();
   if (s.includes('zoning')) return 'Zoning';
@@ -93,6 +106,148 @@ function csvToGeoJSON(csv) {
 map.on('load', async () => {
   map.setFog({});
 
+  // Add states tileset source - try different variations if one doesn't work
+  map.addSource('states', {
+    type: 'vector',
+    url: 'mapbox://communityscale.states'
+  });
+
+  // Debug: Fetch tileset metadata to find source layer name
+  fetch('https://api.mapbox.com/v4/communityscale.states.json?secure&access_token=' + mapboxgl.accessToken)
+    .then(res => res.json())
+    .then(data => {
+      console.log('Tileset metadata:', data);
+      if (data.vector_layers) {
+        console.log('Available source layers:', data.vector_layers.map(l => l.id));
+      }
+    })
+    .catch(err => console.error('Failed to fetch tileset metadata:', err));
+
+  map.on('error', (e) => {
+    console.error('Map error:', e);
+  });
+
+  // Load MA towns geojson
+  const matownsResp = await fetch('matowns.geojson');
+  const matownsData = await matownsResp.json();
+  map.addSource('ma-towns', {
+    type: 'geojson',
+    data: matownsData
+  });
+
+  // Load and parse mamuni CSV to get list of towns with their types
+  const mamuniResp = await fetch('mamuni - Sheet1.csv');
+  const mamuniCsv = await mamuniResp.text();
+  const mamuniLines = mamuniCsv.split('\n');
+  const mamuniRegionTowns = [];
+  const mamuniMuniTowns = [];
+
+  mamuniLines.forEach(line => {
+    const parts = line.split(',');
+    if (parts.length >= 2) {
+      const townName = parts[0].trim().toLowerCase();
+      const townType = parts[1].trim();
+      if (townName.length > 0) {
+        if (townType === 'Region') {
+          mamuniRegionTowns.push(townName);
+        } else if (townType === 'Muni') {
+          mamuniMuniTowns.push(townName);
+        }
+      }
+    }
+  });
+  console.log('MA Region towns:', mamuniRegionTowns);
+  console.log('MA Muni towns:', mamuniMuniTowns);
+
+  // Find the first label layer to insert states below it
+  const layers = map.getStyle().layers;
+  let firstLabelLayerId;
+  for (const layer of layers) {
+    if (layer.type === 'symbol' && layer.layout && layer.layout['text-field']) {
+      firstLabelLayerId = layer.id;
+      break;
+    }
+  }
+
+  // Add states fill layer below labels (initially without filter)
+  map.addLayer({
+    id: 'states-fill',
+    type: 'fill',
+    source: 'states',
+    'source-layer': 'states',
+    paint: {
+      'line-color': '#192f5e',
+      'line-width': 3
+    }
+  }, firstLabelLayerId);
+
+  // Add MA Region towns fill layer (grey)
+  map.addLayer({
+    id: 'ma-towns-region-fill',
+    type: 'fill',
+    source: 'ma-towns',
+    paint: {
+      'fill-color': '#8ca94c', // Grey color
+      'fill-opacity': 1
+    },
+    filter: ['in', ['downcase', ['get', 'TOWN']], ['literal', mamuniRegionTowns]]
+  }, firstLabelLayerId);
+
+  // Add MA Muni towns fill layer (navy)
+  map.addLayer({
+    id: 'ma-towns-muni-fill',
+    type: 'fill',
+    source: 'ma-towns',
+    paint: {
+      'fill-color': '#0a1a3e', // Navy color
+      'fill-opacity': 1
+    },
+    filter: ['in', ['downcase', ['get', 'TOWN']], ['literal', mamuniMuniTowns]]
+  }, firstLabelLayerId);
+
+  // Combine all towns for outline and labels
+  const allMuniTowns = [...mamuniRegionTowns, ...mamuniMuniTowns];
+  console.log('All muni towns for labels:', allMuniTowns.length);
+
+  // Add MA towns outline layer (white) - excluding Lowell
+  const townsWithOutline = allMuniTowns.filter(town => town !== 'lowell');
+  map.addLayer({
+    id: 'ma-towns-outline',
+    type: 'line',
+    source: 'ma-towns',
+    paint: {
+      'line-color': '#ffffff',
+      'line-width': .8,
+      'line-opacity': 1.0
+    },
+    filter: ['in', ['downcase', ['get', 'TOWN']], ['literal', townsWithOutline]]
+  }, firstLabelLayerId);
+
+  // Add MA towns labels layer
+
+  // Create a Set for faster lookup
+  const townSet = new Set(allMuniTowns);
+
+  map.addLayer({
+    id: 'ma-towns-labels',
+    type: 'symbol',
+    source: 'ma-towns',
+    layout: {
+      'visibility': 'none',
+      'text-field': ['get', 'TOWN'],
+      'text-font': ['Open Sans Regular', 'Arial Unicode MS Regular'],
+      'text-size': 16,
+      'text-allow-overlap': false,
+      'text-ignore-placement': false
+    },
+    paint: {
+      'text-color': '#000000',
+      'text-halo-color': '#ffffff',
+      'text-halo-width': 2
+    }
+  });
+  console.log('MA towns labels layer added (no filter for debugging)');
+
   try {
     // 4) fetch from live Google Sheets CSV
     const resp = await fetch('https://docs.google.com/spreadsheets/d/e/2PACX-1vSn5ksUiVITRYgWt-E3maCu2jwE94QZSxG_80oWM4pCRVx51K-Y6B649BpnAQ5axaFu91Pw5j35wWi7/pub?gid=2091918674&single=true&output=csv');
@@ -101,18 +256,36 @@ map.on('load', async () => {
     const geojson = csvToGeoJSON(csvText);
     console.log('Loaded features:', geojson.features.length);
 
+    // Extract unique states from projects and map to GEOID codes
+    const uniqueStates = new Set();
+    geojson.features.forEach(feature => {
+      const stateAbbr = feature.properties.State;
+      if (stateAbbr && stateToGEOID[stateAbbr]) {
+        uniqueStates.add(stateToGEOID[stateAbbr]);
+      }
+    });
+    const activeGEOIDs = Array.from(uniqueStates);
+    console.log('Active states (GEOIDs):', activeGEOIDs);
+
+    // Apply filter to states layers to only show states with projects
+    map.setFilter('states-fill', ['in', ['get', 'GEOID'], ['literal', activeGEOIDs]]);
+    map.setFilter('states-outline', ['in', ['get', 'GEOID'], ['literal', activeGEOIDs]]);
+
     // 5) add source + layer using the live data
     map.addSource('projects', { type: 'geojson', data: geojson });
     map.addLayer({
       id: 'points',
       type: 'circle',
       source: 'projects',
+      layout: {
+        'visibility': 'none'
+      },
       paint: {
         'circle-radius': [
           'interpolate',
           ['linear'],
           ['zoom'],
-          4, 5,
+          5, 5,
           8, 6,
           12, 9
         ],
@@ -127,15 +300,15 @@ map.on('load', async () => {
             ['in', 'housing', ['downcase', ['coalesce', ['get', 'Service'], '']]],
             ['in', 'zoning', ['downcase', ['coalesce', ['get', 'Service'], '']]]
           ],
-          '#1b2f5a',
+          '#8795eb',
           // If Service contains 'housing', use housing plan color
           ['in', 'housing', ['downcase', ['coalesce', ['get', 'Service'], '']]],
-          '#1b2f5a',
+          '#8795eb',
           // If Service contains 'zoning', use zoning color
           ['in', 'zoning', ['downcase', ['coalesce', ['get', 'Service'], '']]],
           '#82AC21',
           // Default: other project type/service
-          '#A34997'
+          '#ecd731'
         ]
       }
     });
@@ -148,9 +321,10 @@ map.on('load', async () => {
       minzoom: 6,
       maxzoom: 12,
       layout: {
+        'visibility': 'none',
         'text-field': ['get', 'NameLocation'],
         'text-font': ['Roboto Condensed', 'Arial Unicode MS Regular'],
-        'text-size': 12,
+        'text-size': 18,
         'text-offset': [0, 1],
         'text-anchor': 'top'
       },
