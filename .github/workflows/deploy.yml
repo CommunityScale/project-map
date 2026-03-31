@@ -25,7 +25,7 @@ jobs:
 
       - name: Generate config.js
         env:
-          TOKEN: ${{ secrets.MAPBOX_TOKEN_PROD }}
+          TOKEN: ${{ secrets.MAPBOX_TOKEN_DEV }}
         run: printf "const MAPBOX_TOKEN = '%s';\n" "$TOKEN" > config.js
 
       - uses: actions/configure-pages@v4
