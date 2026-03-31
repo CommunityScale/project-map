@@ -1,0 +1,453 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>CommunityScale projects</title>
+  <meta name="viewport" content="initial-scale=1,maximum-scale=1,user-scalable=no">
+  <link href="https://api.mapbox.com/mapbox-gl-js/v2.11.0/mapbox-gl.css" rel="stylesheet">
+  <script src="https://api.mapbox.com/mapbox-gl-js/v2.11.0/mapbox-gl.js"></script>
+  <script src="https://unpkg.com/papaparse@5.4.1/papaparse.min.js"></script>
+  <script src="config.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link href="https://fonts.googleapis.com/css2?family=Roboto&family=Roboto+Condensed:wght@700&display=swap" rel="stylesheet">
+  <style>
+    html, body, #map { height: 100%; margin: 0; }
+    .legend { position:absolute; right:10px; bottom:30px; background:#fff; padding:10px; font:12px/20px Roboto,sans-serif; border-radius:6px; box-shadow:0 1px 2px rgba(0,0,0,.1) }
+    .legend div span { display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:6px; }
+    .mapboxgl-popup-close-button { display: none; }
+    .reset-btn { position:absolute; top:10px; right:10px; background:#fff; padding:8px 12px; font:12px Roboto,sans-serif; border:none; border-radius:4px; box-shadow:0 1px 2px rgba(0,0,0,.1); cursor:pointer; }
+    .reset-btn:hover { background:#f5f5f5; }
+    .zoom-controls { position:absolute; top:50px; right:10px; display:flex; flex-direction:column; gap:4px; }
+    .zoom-btn { background:#fff; width:32px; height:32px; font:18px Roboto,sans-serif; border:none; border-radius:4px; box-shadow:0 1px 2px rgba(0,0,0,.1); cursor:pointer; display:flex; align-items:center; justify-content:center; }
+    .zoom-btn:hover { background:#f5f5f5; }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <button class="reset-btn" onclick="resetView()">Reset map</button>
+  <div class="zoom-controls">
+    <button class="zoom-btn" onclick="map.zoomIn()">+</button>
+    <button class="zoom-btn" onclick="map.zoomOut()">&minus;</button>
+  </div>
+  <!-- Bottom-right stack: filter panel above legend with consistent gap -->
+  <div style="position:absolute;right:10px;bottom:30px;display:flex;flex-direction:column;gap:8px;align-items:stretch">
+
+    <!-- Filter panel -->
+    <div id="filter-panel" style="background:#fff;border-radius:6px;box-shadow:0 1px 2px rgba(0,0,0,.1);overflow:hidden;font:12px/20px Roboto,sans-serif;min-width:160px">
+      <button id="filter-toggle" onclick="toggleFilterPanel()" style="width:100%;display:flex;align-items:center;justify-content:space-between;padding:6px 10px;font:600 12px/20px Roboto,sans-serif;background:none;border:none;cursor:pointer;color:#374151">
+        <span>Filter project types</span>
+        <span id="filter-chevron" style="margin-left:8px;color:#9ca3af">&#9660;</span>
+      </button>
+      <div id="filter-body" style="display:none;border-top:1px solid #f3f4f6;padding:6px 10px;display:flex;flex-direction:column;gap:4px">
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+          <input type="checkbox" id="tog-muni" checked onchange="toggleGroup('muni', this.checked)" style="accent-color:#8E9CEC">
+          <span>Municipal</span>
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+          <input type="checkbox" id="tog-county" checked onchange="toggleGroup('county', this.checked)" style="accent-color:#8E9CEC">
+          <span>County</span>
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+          <input type="checkbox" id="tog-state" checked onchange="toggleGroup('state', this.checked)" style="accent-color:#8E9CEC">
+          <span>State</span>
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+          <input type="checkbox" id="tog-region" checked onchange="toggleGroup('region', this.checked)" style="accent-color:#8E9CEC">
+          <span>Regional</span>
+        </label>
+      </div>
+    </div>
+
+    <!-- Legend -->
+    <div class="legend" style="position:static;box-shadow:0 1px 2px rgba(0,0,0,.1)">
+      <div><span style="background-color:#8E9CEC"></span>Active &amp; recent projects</div>
+    </div>
+
+  </div>
+
+<script>
+mapboxgl.accessToken = MAPBOX_TOKEN;
+const initialCenter = [-86, 39];
+const initialZoom = 3.4;
+const map = new mapboxgl.Map({
+  container: 'map',
+  style: 'mapbox://styles/mapbox/light-v11',
+  center: initialCenter, zoom: initialZoom, projection: 'mercator'
+});
+
+function showPopup(lngLat, html) {
+  const popup = new mapboxgl.Popup().setLngLat(lngLat).setHTML(html).addTo(map);
+  popup.on('open', () => {
+    setTimeout(() => {
+      const content = popup.getElement().querySelector('.mapboxgl-popup-content');
+      if (!content) return;
+      // Blur any focused link so it can't pull the scroll position
+      const focused = content.querySelector(':focus');
+      if (focused) focused.blur();
+      const scrollEl = content.querySelector('div');
+      if (scrollEl) scrollEl.scrollTop = 0;
+    }, 50);
+  });
+}
+
+const LAYER_GROUPS = {
+  muni:   ['muni-fills', 'muni-outlines'],
+  county: ['county-fills', 'county-outlines'],
+  state:  ['state-fills', 'state-outlines'],
+  region: ['region-muni-fills', 'region-muni-outlines', 'region-county-fills', 'region-county-outlines', 'cmrpc-fills', 'cmrpc-outlines'],
+};
+
+window.toggleGroup = function(group, visible) {
+  const vis = visible ? 'visible' : 'none';
+  (LAYER_GROUPS[group] || []).forEach(id => {
+    if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', vis);
+  });
+};
+
+window.toggleFilterPanel = function() {
+  const body = document.getElementById('filter-body');
+  const chevron = document.getElementById('filter-chevron');
+  const open = body.style.display !== 'none';
+  body.style.display = open ? 'none' : 'flex';
+  chevron.innerHTML = open ? '&#9660;' : '&#9650;';
+};
+
+window.resetView = function() {
+  const popups = document.getElementsByClassName('mapboxgl-popup');
+  while (popups.length) popups[0].remove();
+  map.flyTo({ center: initialCenter, zoom: initialZoom, essential: true });
+};
+
+// State common name -> 2-digit FIPS GEOID
+const STATE_GEOID = {
+  'Alabama': '01', 'Alaska': '02', 'Arizona': '04', 'Arkansas': '05',
+  'California': '06', 'Colorado': '08', 'Connecticut': '09', 'Delaware': '10',
+  'Florida': '12', 'Georgia': '13', 'Hawaii': '15', 'Idaho': '16',
+  'Illinois': '17', 'Indiana': '18', 'Iowa': '19', 'Kansas': '20',
+  'Kentucky': '21', 'Louisiana': '22', 'Maine': '23', 'Maryland': '24',
+  'Massachusetts': '25', 'Michigan': '26', 'Minnesota': '27', 'Mississippi': '28',
+  'Missouri': '29', 'Montana': '30', 'Nebraska': '31', 'Nevada': '32',
+  'New Hampshire': '33', 'New Jersey': '34', 'New Mexico': '35', 'New York': '36',
+  'North Carolina': '37', 'North Dakota': '38', 'Ohio': '39', 'Oklahoma': '40',
+  'Oregon': '41', 'Pennsylvania': '42', 'Rhode Island': '44', 'South Carolina': '45',
+  'South Dakota': '46', 'Tennessee': '47', 'Texas': '48', 'Utah': '49',
+  'Vermont': '50', 'Virginia': '51', 'Washington': '53', 'West Virginia': '54',
+  'Wisconsin': '55', 'Wyoming': '56', 'District of Columbia': '11'
+};
+
+// State abbreviation -> 2-digit FIPS GEOID (fallback when NameLocation is abbr, not full name)
+const STATE_ABBR_GEOID = {
+  'AL':'01','AK':'02','AZ':'04','AR':'05','CA':'06','CO':'08','CT':'09','DE':'10',
+  'FL':'12','GA':'13','HI':'15','ID':'16','IL':'17','IN':'18','IA':'19','KS':'20',
+  'KY':'21','LA':'22','ME':'23','MD':'24','MA':'25','MI':'26','MN':'27','MS':'28',
+  'MO':'29','MT':'30','NE':'31','NV':'32','NH':'33','NJ':'34','NM':'35','NY':'36',
+  'NC':'37','ND':'38','OH':'39','OK':'40','OR':'41','PA':'42','RI':'44','SC':'45',
+  'SD':'46','TN':'47','TX':'48','UT':'49','VT':'50','VA':'51','WA':'53','WV':'54',
+  'WI':'55','WY':'56','DC':'11'
+};
+
+// GEOID -> state name (reverse of STATE_GEOID)
+const GEOID_STATE = Object.fromEntries(Object.entries(STATE_GEOID).map(([k,v]) => [v, k]));
+
+// Source-layer names within each tileset (confirmed via Mapbox tileset metadata)
+const MUNI_SOURCE_LAYER   = 'geos';
+const COUNTY_SOURCE_LAYER = 'geos';
+const STATE_SOURCE_LAYER  = 'states';
+
+// Lookup maps: key -> array of CSV project rows
+const muniToProjects   = {};
+const countyToProjects = {};
+const stateToProjects  = {};
+
+function addToLookup(lookup, key, row) {
+  if (!lookup[key]) lookup[key] = [];
+  lookup[key].push(row);
+}
+
+function buildPopupHTML(projects, headerLabel) {
+  let html = '<div style="font-family:Roboto,sans-serif;font-size:12px;line-height:1.4;max-height:300px;overflow-y:auto">';
+  if (headerLabel) {
+    html += "<div style=\"font-family:'Roboto Condensed',sans-serif;font-weight:700;font-size:16px;margin-bottom:8px;border-bottom:2px solid #8E9CEC;padding-bottom:4px\">" + headerLabel + "</div>";
+    if (projects.length > 1) {
+      html += '<div style="font-size:11px;color:#666;margin-bottom:8px">' + projects.length + ' projects</div>';
+    }
+  }
+  projects.forEach(p => {
+    let description = '';
+    if (p['Resume blurb']) {
+      const parts = p['Resume blurb'].split(': ');
+      description = parts.length > 1 ? parts.slice(1).join(': ').trim() : '';
+    }
+    const blogLink = (p['CS blog link'] && p['CS blog link'].toLowerCase() !== 'not_applicable') ? p['CS blog link'] : '';
+    html += '<div style="padding:8px 0;border-top:1px solid #eee">';
+    html += "<div style=\"font-family:'Roboto Condensed',sans-serif;font-weight:700;font-size:14px;margin-bottom:4px\">" + (p.Project || 'Untitled') + "</div>";
+    if (p.Service)   html += '<div style="margin-top:4px"><strong>Service:</strong> ' + p.Service + '</div>';
+    if (description) html += '<div style="margin-top:4px">' + description + '</div>';
+    if (blogLink)    html += '<div style="margin-top:6px"><a href="' + blogLink + '" target="_blank" style="color:#8E9CEC;text-decoration:none">Learn more</a></div>';
+    html += '</div>';
+  });
+  html += '</div>';
+  return html;
+}
+
+map.on('load', async () => {
+  map.setFog({});
+  try {
+    // Load project data from CSV and CMRPC region GeoJSON in parallel
+    const [parsed, cmrpcGeoJSON] = await Promise.all([
+      new Promise((resolve, reject) => {
+        Papa.parse('projects.csv', {
+          download: true, header: true,
+          complete: resolve, error: reject
+        });
+      }),
+      fetch('https://raw.githubusercontent.com/CommunityScale/CMRPC/main/communityboundaries.geojson').then(r => r.json())
+    ]);
+
+    const muniNames       = [];
+    const countyNames     = [];
+    const regionMuniNames   = [];
+    const regionCountyNames = [];
+    const stateGEOIDs    = [];
+    const allStateGEOIDs = []; // GEOIDs for every project's state (for low-zoom overview)
+
+    for (const row of parsed.data) {
+      const status       = (row.Status       || '').trim();
+      const placeType    = (row.PlaceType    || '').trim();
+      const nameLocation = (row.PlaceGeo || '').trim();
+
+      if (status !== '1 Under contract' && status !== '6 Completed') continue;
+      if (!placeType || !nameLocation) continue;
+
+      // Collect the state GEOID for every mapped project (used for zoom 0-4 overview)
+      const stateAbbr = (row.State || '').trim().toUpperCase();
+      const overviewGeoid = STATE_ABBR_GEOID[stateAbbr];
+      if (overviewGeoid && !allStateGEOIDs.includes(overviewGeoid)) {
+        allStateGEOIDs.push(overviewGeoid);
+      }
+
+      if (placeType === 'Muni') {
+        addToLookup(muniToProjects, nameLocation, row);
+        if (!muniNames.includes(nameLocation)) muniNames.push(nameLocation);
+
+      } else if (placeType === 'County') {
+        addToLookup(countyToProjects, nameLocation, row);
+        if (!countyNames.includes(nameLocation)) countyNames.push(nameLocation);
+
+      } else if (placeType === 'State') {
+        // NameLocation may be full state name ("New Hampshire") or abbr — try both
+        const state = (row.State || '').trim().toUpperCase();
+        const geoidByName = STATE_GEOID[nameLocation];
+        const geoidByAbbr = STATE_ABBR_GEOID[state];
+        const geoid = geoidByName || geoidByAbbr;
+        if (geoid) {
+          addToLookup(stateToProjects, geoid, row);
+          if (!stateGEOIDs.includes(geoid)) stateGEOIDs.push(geoid);
+        } else {
+          console.warn('No GEOID found for state:', nameLocation, state);
+        }
+
+      } else if (placeType === 'Region') {
+        // PlaceGeo lists sub-places semicolon-separated (e.g. "Anoka, MN; Carver, MN; ...")
+        const items = nameLocation.split(';')
+          .map(s => s.replace(/^and\s+/i, '').trim())
+          .filter(Boolean);
+
+        for (const item of items) {
+          if (item.toLowerCase().includes('county')) {
+            addToLookup(countyToProjects, item, row);
+            if (!regionCountyNames.includes(item)) regionCountyNames.push(item);
+          } else {
+            addToLookup(muniToProjects, item, row);
+            if (!regionMuniNames.includes(item)) regionMuniNames.push(item);
+            addToLookup(countyToProjects, item, row);
+            if (!regionCountyNames.includes(item)) regionCountyNames.push(item);
+          }
+        }
+      }
+    }
+
+    console.log('Muni names:', muniNames);
+    console.log('County names:', countyNames);
+    console.log('State GEOIDs:', stateGEOIDs);
+
+    // Use 'match' expression -- more reliable than 'in' for large arrays in Mapbox GL JS
+    const muniFilter        = muniNames.length        ? ['match', ['get', 'name'], muniNames,        true, false] : false;
+    const countyFilter      = countyNames.length      ? ['match', ['get', 'name'], countyNames,      true, false] : false;
+    const regionMuniFilter   = regionMuniNames.length   ? ['match', ['get', 'name'], regionMuniNames,   true, false] : false;
+    const regionCountyFilter = regionCountyNames.length ? ['match', ['get', 'name'], regionCountyNames, true, false] : false;
+    const stateFilter       = stateGEOIDs.length    ? ['match', ['get', 'GEOID'], stateGEOIDs,    true, false] : false;
+    const allStateFilter    = allStateGEOIDs.length ? ['match', ['get', 'GEOID'], allStateGEOIDs, true, false] : false;
+
+    const FILL_COLOR       = '#8E9CEC';
+    const FILL_OPACITY     = 0.4;
+    const LINE_COLOR       = '#8E9CEC';
+    const LINE_WIDTH       = 1.5;
+    const REGION_COLOR     = '#8E9CEC';
+    const REGION_LINE_COLOR = '#8E9CEC';
+
+    // State tileset (shared by both zoom ranges)
+    map.addSource('state-source', { type: 'vector', url: 'mapbox://communityscale.states' });
+
+    // Zoom 0–4: show a state polygon for every project's home state
+    map.addLayer({ id: 'state-overview-fills',    type: 'fill', source: 'state-source', 'source-layer': STATE_SOURCE_LAYER,
+      filter: allStateFilter,
+      paint: {
+        'fill-color':   ['step', ['zoom'], FILL_COLOR, 5, '#aaaaaa'],
+        'fill-opacity': ['step', ['zoom'], FILL_OPACITY, 5, 0.15]
+      } });
+    map.addLayer({ id: 'state-overview-outlines', type: 'line', source: 'state-source', 'source-layer': STATE_SOURCE_LAYER,
+      filter: allStateFilter,
+      paint: {
+        'line-color': ['step', ['zoom'], LINE_COLOR, 5, '#aaaaaa'],
+        'line-width': LINE_WIDTH
+      } });
+
+    // Zoom 4.1+: PlaceType-specific features
+    // State-type project features: always full color, layered on top of grey overview states
+    map.addLayer({ id: 'state-fills',    type: 'fill', source: 'state-source', 'source-layer': STATE_SOURCE_LAYER,
+      minzoom: 5, filter: stateFilter,
+      paint: { 'fill-color': FILL_COLOR, 'fill-opacity': FILL_OPACITY } });
+    map.addLayer({ id: 'state-outlines', type: 'line', source: 'state-source', 'source-layer': STATE_SOURCE_LAYER,
+      minzoom: 5, filter: stateFilter,
+      paint: { 'line-color': LINE_COLOR, 'line-width': LINE_WIDTH } });
+
+
+    // CMRPC region: custom GeoJSON boundaries (own source, render below muni/county)
+    const cmrpcProject = parsed.data.find(r => (r['End client'] || '').includes('CMRPC'));
+    map.addSource('cmrpc-source', { type: 'geojson', data: cmrpcGeoJSON });
+    map.addLayer({ id: 'cmrpc-fills',    type: 'fill', source: 'cmrpc-source',
+      minzoom: 5,
+      paint: { 'fill-color': REGION_COLOR, 'fill-opacity': FILL_OPACITY } });
+    map.addLayer({ id: 'cmrpc-outlines', type: 'line', source: 'cmrpc-source',
+      minzoom: 5,
+      paint: { 'line-color': REGION_LINE_COLOR, 'line-width': LINE_WIDTH } });
+
+    // Municipality tileset: region layers first (below), then muni fills/outlines (above)
+    map.addSource('muni-source', { type: 'vector', url: 'mapbox://communityscale.municipality' });
+    if (regionMuniFilter) {
+      map.addLayer({ id: 'region-muni-fills',    type: 'fill', source: 'muni-source', 'source-layer': MUNI_SOURCE_LAYER,
+        minzoom: 5, filter: regionMuniFilter,
+        paint: { 'fill-color': REGION_COLOR, 'fill-opacity': FILL_OPACITY } });
+      map.addLayer({ id: 'region-muni-outlines', type: 'line', source: 'muni-source', 'source-layer': MUNI_SOURCE_LAYER,
+        minzoom: 5, filter: regionMuniFilter,
+        paint: { 'line-color': REGION_LINE_COLOR, 'line-width': LINE_WIDTH } });
+    }
+    map.addLayer({ id: 'muni-fills',    type: 'fill', source: 'muni-source', 'source-layer': MUNI_SOURCE_LAYER,
+      minzoom: 5, filter: muniFilter,
+      paint: { 'fill-color': FILL_COLOR, 'fill-opacity': FILL_OPACITY } });
+    map.addLayer({ id: 'muni-outlines', type: 'line', source: 'muni-source', 'source-layer': MUNI_SOURCE_LAYER,
+      minzoom: 5, filter: muniFilter,
+      paint: { 'line-color': LINE_COLOR, 'line-width': LINE_WIDTH } });
+
+    // County tileset: region layers first (below), then county fills/outlines (above)
+    map.addSource('county-source', { type: 'vector', url: 'mapbox://communityscale.county' });
+    if (regionCountyFilter) {
+      map.addLayer({ id: 'region-county-fills',    type: 'fill', source: 'county-source', 'source-layer': COUNTY_SOURCE_LAYER,
+        minzoom: 5, filter: regionCountyFilter,
+        paint: { 'fill-color': REGION_COLOR, 'fill-opacity': FILL_OPACITY } });
+      map.addLayer({ id: 'region-county-outlines', type: 'line', source: 'county-source', 'source-layer': COUNTY_SOURCE_LAYER,
+        minzoom: 5, filter: regionCountyFilter,
+        paint: { 'line-color': REGION_LINE_COLOR, 'line-width': LINE_WIDTH } });
+    }
+    map.addLayer({ id: 'county-fills',    type: 'fill', source: 'county-source', 'source-layer': COUNTY_SOURCE_LAYER,
+      minzoom: 5, filter: countyFilter,
+      paint: { 'fill-color': FILL_COLOR, 'fill-opacity': FILL_OPACITY } });
+    map.addLayer({ id: 'county-outlines', type: 'line', source: 'county-source', 'source-layer': COUNTY_SOURCE_LAYER,
+      minzoom: 5, filter: countyFilter,
+      paint: { 'line-color': LINE_COLOR, 'line-width': LINE_WIDTH } });
+
+
+
+
+
+    // Diagnostics: after map is idle, sample features from each tileset layer
+    map.once('idle', () => {
+      const muniSample = map.queryRenderedFeatures({ layers: ['muni-fills'] });
+      console.log('muni-fills rendered features (no filter):', muniSample.length);
+      if (muniSample.length) console.log('sample muni name:', muniSample[0].properties.name);
+
+      const muniAll = map.querySourceFeatures('muni-source', { sourceLayer: 'geos' });
+      console.log('muni source total features in view:', muniAll.length);
+      if (muniAll.length) console.log('sample muni source name:', muniAll[0].properties.name);
+
+      const countyAll = map.querySourceFeatures('county-source', { sourceLayer: 'geos' });
+      console.log('county source total features in view:', countyAll.length);
+      if (countyAll.length) console.log('sample county source name:', countyAll[0].properties.name);
+
+      const stateAll = map.querySourceFeatures('state-source', { sourceLayer: 'states' });
+      console.log('state source total features in view:', stateAll.length);
+      if (stateAll.length) console.log('sample state GEOID:', stateAll[0].properties.GEOID);
+
+      console.log('muniFilter:', JSON.stringify(muniFilter));
+      console.log('countyFilter:', JSON.stringify(countyFilter));
+      console.log('stateFilter:', JSON.stringify(stateFilter));
+    });
+
+    // Click handlers
+    map.on('click', 'muni-fills', e => {
+      if (e.originalEvent._handled) return;
+      const name = e.features[0].properties.name;
+      const projects = muniToProjects[name];
+      if (!projects || !projects.length) return;
+      e.originalEvent._handled = true;
+      showPopup(e.lngLat, buildPopupHTML(projects, name));
+    });
+
+    map.on('click', 'county-fills', e => {
+      if (e.originalEvent._handled) return;
+      const name = e.features[0].properties.name;
+      const projects = countyToProjects[name];
+      if (!projects || !projects.length) return;
+      e.originalEvent._handled = true;
+      showPopup(e.lngLat, buildPopupHTML(projects, name));
+    });
+
+    map.on('click', 'region-muni-fills', e => {
+      if (e.originalEvent._handled) return;
+      const name = e.features[0].properties.name;
+      const projects = muniToProjects[name];
+      if (!projects || !projects.length) return;
+      e.originalEvent._handled = true;
+      showPopup(e.lngLat, buildPopupHTML(projects, name));
+    });
+
+    map.on('click', 'region-county-fills', e => {
+      if (e.originalEvent._handled) return;
+      const name = e.features[0].properties.name;
+      const projects = countyToProjects[name];
+      if (!projects || !projects.length) return;
+      e.originalEvent._handled = true;
+      showPopup(e.lngLat, buildPopupHTML(projects, name));
+    });
+
+    map.on('click', 'state-fills', e => {
+      if (e.originalEvent._handled) return;
+      const geoid = e.features[0].properties.GEOID;
+      const projects = stateToProjects[geoid];
+      if (!projects || !projects.length) return;
+      const stateName = GEOID_STATE[geoid] || geoid;
+      showPopup(e.lngLat, buildPopupHTML(projects, stateName));
+    });
+
+
+    if (cmrpcProject) {
+      map.on('click', 'cmrpc-fills', e => {
+        if (e.originalEvent._handled) return;
+        e.originalEvent._handled = true;
+        showPopup(e.lngLat, buildPopupHTML([cmrpcProject], 'Central Massachusetts Region'));
+      });
+    }
+
+    ['muni-fills', 'county-fills', 'region-muni-fills', 'region-county-fills', 'cmrpc-fills', 'state-fills'].forEach(id => {
+      map.on('mouseenter', id, () => { map.getCanvas().style.cursor = 'pointer'; });
+      map.on('mouseleave', id, () => { map.getCanvas().style.cursor = ''; });
+    });
+
+  } catch (err) {
+    console.error('Error loading projects:', err);
+  }
+});
+</script>
+</body>
+</html>
