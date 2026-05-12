@@ -243,7 +243,7 @@ map.on('load', async () => {
       const placeType    = (row.PlaceType    || '').trim();
       const nameLocation = (row.PlaceGeo || '').trim();
 
-      if (status !== '1 Under contract' && status !== '6 Completed') continue;
+      if (status !== '1 Under contract' && status !== '6 Completed' && status !== '9 Completed pre-CS') continue;
       if (!placeType || !nameLocation) continue;
 
       // Collect the state GEOID for every mapped project (used for zoom 0-4 overview)
