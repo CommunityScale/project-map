@@ -170,6 +170,25 @@ function addToLookup(lookup, key, row) {
   lookup[key].push(row);
 }
 
+function toOngoing(description) {
+  if (!description) return description;
+  const irregulars = {
+    built: 'building', led: 'leading', wrote: 'writing', ran: 'running',
+    made: 'making', held: 'holding', did: 'doing', went: 'going'
+  };
+  function convertVerb(word) {
+    const lower = word.toLowerCase();
+    const result = irregulars[lower]
+      || (lower.endsWith('ied') ? lower.slice(0, -3) + 'ying' : null)
+      || (lower.endsWith('ed')  ? lower.slice(0, -2) + 'ing'  : null);
+    if (!result) return word;
+    return /^[A-Z]/.test(word) ? result.charAt(0).toUpperCase() + result.slice(1) : result;
+  }
+  return description
+    .replace(/^[A-Za-z]+/, word => convertVerb(word))
+    .replace(/(,\s*(?:and\s+)?)([A-Za-z]+)/g, (_, sep, word) => sep + convertVerb(word));
+}
+
 function buildPopupHTML(projects, headerLabel) {
   let html = '<div style="font-family:Roboto,sans-serif;font-size:12px;line-height:1.4;max-height:300px;overflow-y:auto">';
   if (headerLabel) {
@@ -184,6 +203,8 @@ function buildPopupHTML(projects, headerLabel) {
       const parts = p['Resume blurb'].split(': ');
       description = parts.length > 1 ? parts.slice(1).join(': ').trim() : '';
     }
+    const status = (p.Status || '').trim();
+    if (status === '1 Under contract') description = toOngoing(description);
     const blogLink = (p['CS blog link'] && p['CS blog link'].toLowerCase() !== 'not_applicable') ? p['CS blog link'] : '';
     html += '<div style="padding:8px 0;border-top:1px solid #eee">';
     html += "<div style=\"font-family:'Roboto Condensed',sans-serif;font-weight:700;font-size:14px;margin-bottom:4px\">" + (p.Project || 'Untitled') + "</div>";
