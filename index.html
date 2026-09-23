@@ -201,7 +201,7 @@ map.on('load', async () => {
     // Load project data from CSV and CMRPC region GeoJSON in parallel
     const [parsed, cmrpcGeoJSON] = await Promise.all([
       new Promise((resolve, reject) => {
-        Papa.parse('projects.csv', {
+        Papa.parse('https://docs.google.com/spreadsheets/d/1-EMsCLnEAaO_wWJPUj1FYtqPzpUAV7I59BbFjAQcTwo/export?format=csv&gid=1167048129', {
           download: true, header: true,
           complete: resolve, error: reject
         });

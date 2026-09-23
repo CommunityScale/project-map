@@ -8,13 +8,15 @@ This repository hosts the interactive map that showcases CommunityScale's planni
 
 ## Tech stack
 - Mapbox GL JS for tiled basemaps, vector rendering, and navigation controls
-- PapaParse for transforming the project spreadsheet (CSV) into GeoJSON features on the fly
+- PapaParse for transforming the live project spreadsheet (CSV) into GeoJSON features on the fly
 - Vanilla HTML, CSS, and JavaScript for the application shell and pop-up logic
-- Static data assets (`proj.csv`, `projects.csv`, `projplaces3.geojson`) maintained in this repository
+- Static geospatial asset (`projplaces3.geojson`) maintained in this repository
 
 ## Repository layout
-- `projectmap.html` – Full-page map for CommunityScale's site
-- `proj.csv` and `projects.csv` – Raw project data ingested by the client-side parser. The map pulls project metadata directly from the CSV and GeoJSON files in this repository.
+- `index.html` – Production map (municipal/county/state boundary view), served at the site root by GitHub Pages
+- `map3.html` – Development copy of the same map, used to try out new features before they land in `index.html`
+- `projectmap.html` – Alternate point-based map for CommunityScale's site
+- Project data is pulled live at page load from the "Index" tab of the "Project tracker and index" Google Sheet (CSV export), rather than from a file in this repository. Edit that sheet to update the map.
 - `projplaces3.geojson` – Curated geospatial dataset tapped by the Mapbox layer
 - `projplaces3.qmd` – Quarto notebook used to regenerate the GeoJSON from source data
 
