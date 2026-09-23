@@ -96,10 +96,10 @@ function showPopup(lngLat, html) {
 }
 
 const LAYER_GROUPS = {
-  muni:   ['muni-fills', 'muni-outlines'],
+  muni:   ['muni-fills', 'muni-outlines', 'muni-dots'],
   county: ['county-fills', 'county-outlines'],
   state:  ['state-fills', 'state-outlines'],
-  region: ['region-muni-fills', 'region-muni-outlines', 'region-county-fills', 'region-county-outlines', 'cmrpc-fills', 'cmrpc-outlines'],
+  region: ['region-muni-fills', 'region-muni-outlines', 'region-county-fills', 'region-county-outlines', 'cmrpc-fills', 'cmrpc-outlines', 'region-muni-dots'],
 };
 
 window.toggleGroup = function(group, visible) {
@@ -169,6 +169,45 @@ function addToLookup(lookup, key, row) {
   lookup[key].push(row);
 }
 
+// Area-weighted centroid of a polygon ring's outer boundary (holes ignored — good enough for a marker)
+function ringCentroid(ring) {
+  let area = 0, cx = 0, cy = 0;
+  for (let i = 0; i < ring.length - 1; i++) {
+    const [x0, y0] = ring[i];
+    const [x1, y1] = ring[i + 1];
+    const cross = x0 * y1 - x1 * y0;
+    area += cross;
+    cx += (x0 + x1) * cross;
+    cy += (y0 + y1) * cross;
+  }
+  area *= 0.5;
+  if (Math.abs(area) < 1e-12) {
+    const n = ring.length - 1;
+    let sx = 0, sy = 0;
+    for (let i = 0; i < n; i++) { sx += ring[i][0]; sy += ring[i][1]; }
+    return { x: sx / n, y: sy / n, weight: 1e-9 };
+  }
+  return { x: cx / (6 * area), y: cy / (6 * area), weight: Math.abs(area) };
+}
+
+function geometryCentroid(geometry) {
+  if (!geometry) return null;
+  const polygons = geometry.type === 'Polygon' ? [geometry.coordinates]
+                  : geometry.type === 'MultiPolygon' ? geometry.coordinates
+                  : null;
+  if (!polygons || !polygons.length) return null;
+  let totalWeight = 0, wx = 0, wy = 0;
+  polygons.forEach(rings => {
+    if (!rings.length || rings[0].length < 4) return;
+    const { x, y, weight } = ringCentroid(rings[0]);
+    totalWeight += weight;
+    wx += x * weight;
+    wy += y * weight;
+  });
+  if (!totalWeight) return null;
+  return [wx / totalWeight, wy / totalWeight];
+}
+
 function buildPopupHTML(projects, headerLabel) {
   let html = '<div style="font-family:Roboto,sans-serif;font-size:12px;line-height:1.4;max-height:300px;overflow-y:auto">';
   if (headerLabel) {
@@ -218,7 +257,8 @@ map.on('load', async () => {
 
     for (const row of parsed.data) {
       const status       = (row.Status       || '').trim();
-      const placeType    = (row.PlaceType    || '').trim();
+      let placeType       = (row.PlaceType    || '').trim();
+      if (placeType === 'Town') placeType = 'Muni';
       const nameLocation = (row.PlaceGeo || '').trim();
 
       if (status !== '1 Under contract' && status !== '6 Completed') continue;
@@ -290,6 +330,7 @@ map.on('load', async () => {
     const LINE_WIDTH       = 1.5;
     const REGION_COLOR     = '#8E9CEC';
     const REGION_LINE_COLOR = '#8E9CEC';
+    const OUTLINE_ZOOM     = 8; // below this, muni-type places render as a dot; at/above, full boundary outline
 
     // State tileset (shared by both zoom ranges)
     map.addSource('state-source', { type: 'vector', url: 'mapbox://communityscale.states' });
@@ -335,17 +376,60 @@ map.on('load', async () => {
     if (regionMuniFilter) {
       map.addLayer({ id: 'region-muni-fills',    type: 'fill', source: 'muni-source', 'source-layer': MUNI_SOURCE_LAYER,
         minzoom: 5, filter: regionMuniFilter,
-        paint: { 'fill-color': REGION_COLOR, 'fill-opacity': FILL_OPACITY } });
+        paint: { 'fill-color': REGION_COLOR, 'fill-opacity': ['step', ['zoom'], 0, OUTLINE_ZOOM, FILL_OPACITY] } });
       map.addLayer({ id: 'region-muni-outlines', type: 'line', source: 'muni-source', 'source-layer': MUNI_SOURCE_LAYER,
         minzoom: 5, filter: regionMuniFilter,
-        paint: { 'line-color': REGION_LINE_COLOR, 'line-width': LINE_WIDTH } });
+        paint: { 'line-color': REGION_LINE_COLOR, 'line-width': LINE_WIDTH, 'line-opacity': ['step', ['zoom'], 0, OUTLINE_ZOOM, 1] } });
     }
     map.addLayer({ id: 'muni-fills',    type: 'fill', source: 'muni-source', 'source-layer': MUNI_SOURCE_LAYER,
       minzoom: 5, filter: muniFilter,
-      paint: { 'fill-color': FILL_COLOR, 'fill-opacity': FILL_OPACITY } });
+      paint: { 'fill-color': FILL_COLOR, 'fill-opacity': ['step', ['zoom'], 0, OUTLINE_ZOOM, FILL_OPACITY] } });
     map.addLayer({ id: 'muni-outlines', type: 'line', source: 'muni-source', 'source-layer': MUNI_SOURCE_LAYER,
       minzoom: 5, filter: muniFilter,
-      paint: { 'line-color': LINE_COLOR, 'line-width': LINE_WIDTH } });
+      paint: { 'line-color': LINE_COLOR, 'line-width': LINE_WIDTH, 'line-opacity': ['step', ['zoom'], 0, OUTLINE_ZOOM, 1] } });
+
+    // Muni dot markers: shown from zoom 5 up to OUTLINE_ZOOM, standing in for outlines too small to see.
+    // Populated from centroids computed off the muni-source tile geometry as it loads (see updateMuniCentroids below).
+    const muniPointNames = Array.from(new Set([...muniNames, ...regionMuniNames]));
+    const centroidByName = {};
+
+    map.addSource('muni-dots-source', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
+    map.addSource('region-muni-dots-source', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
+
+    map.addLayer({ id: 'region-muni-dots', type: 'circle', source: 'region-muni-dots-source',
+      minzoom: 5, maxzoom: OUTLINE_ZOOM,
+      paint: { 'circle-radius': 5, 'circle-color': REGION_COLOR, 'circle-stroke-width': 1.5, 'circle-stroke-color': '#ffffff' } });
+    map.addLayer({ id: 'muni-dots', type: 'circle', source: 'muni-dots-source',
+      minzoom: 5, maxzoom: OUTLINE_ZOOM,
+      paint: { 'circle-radius': 5, 'circle-color': FILL_COLOR, 'circle-stroke-width': 1.5, 'circle-stroke-color': '#ffffff' } });
+
+    function refreshMuniDots() {
+      const toFeatures = names => names.filter(name => centroidByName[name]).map(name => ({
+        type: 'Feature', geometry: { type: 'Point', coordinates: centroidByName[name] }, properties: { name }
+      }));
+      map.getSource('muni-dots-source').setData({ type: 'FeatureCollection', features: toFeatures(muniNames) });
+      map.getSource('region-muni-dots-source').setData({ type: 'FeatureCollection', features: toFeatures(regionMuniNames) });
+    }
+
+    function updateMuniCentroids() {
+      if (!muniPointNames.length || !map.isSourceLoaded('muni-source')) return;
+      const features = map.querySourceFeatures('muni-source', {
+        sourceLayer: MUNI_SOURCE_LAYER,
+        filter: ['match', ['get', 'name'], muniPointNames, true, false]
+      });
+      let changed = false;
+      features.forEach(f => {
+        const name = f.properties && f.properties.name;
+        if (!name || centroidByName[name]) return;
+        const centroid = geometryCentroid(f.geometry);
+        if (centroid) { centroidByName[name] = centroid; changed = true; }
+      });
+      if (changed) refreshMuniDots();
+    }
+
+    map.on('sourcedata', e => {
+      if (e.sourceId === 'muni-source' && e.isSourceLoaded) updateMuniCentroids();
+    });
 
     // County tileset: region layers first (below), then county fills/outlines (above)
     map.addSource('county-source', { type: 'vector', url: 'mapbox://communityscale.county' });
@@ -392,6 +476,24 @@ map.on('load', async () => {
       showPopup(e.lngLat, buildPopupHTML(projects, name));
     });
 
+    map.on('click', 'muni-dots', e => {
+      if (e.originalEvent._handled) return;
+      const name = e.features[0].properties.name;
+      const projects = muniToProjects[name];
+      if (!projects || !projects.length) return;
+      e.originalEvent._handled = true;
+      showPopup(e.lngLat, buildPopupHTML(projects, name));
+    });
+
+    map.on('click', 'region-muni-dots', e => {
+      if (e.originalEvent._handled) return;
+      const name = e.features[0].properties.name;
+      const projects = muniToProjects[name];
+      if (!projects || !projects.length) return;
+      e.originalEvent._handled = true;
+      showPopup(e.lngLat, buildPopupHTML(projects, name));
+    });
+
     map.on('click', 'region-county-fills', e => {
       if (e.originalEvent._handled) return;
       const name = e.features[0].properties.name;
@@ -418,7 +520,7 @@ map.on('load', async () => {
       });
     }
 
-    ['muni-fills', 'county-fills', 'region-muni-fills', 'region-county-fills', 'cmrpc-fills', 'state-fills'].forEach(id => {
+    ['muni-fills', 'county-fills', 'region-muni-fills', 'region-county-fills', 'cmrpc-fills', 'state-fills', 'muni-dots', 'region-muni-dots'].forEach(id => {
       map.on('mouseenter', id, () => { map.getCanvas().style.cursor = 'pointer'; });
       map.on('mouseleave', id, () => { map.getCanvas().style.cursor = ''; });
     });
